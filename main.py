@@ -12,6 +12,7 @@ import config
 from datetime import datetime
 import db
 import cache
+import lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,17 +94,6 @@ def _serialize_order(order:dict) -> dict:
         result["amount"] = float(result["amount"])
     return result
 
-def _serialize_order(order:dict) -> dict:
-    """datetime -> str, Decimal -> float, 方便 JSON 序列化"""
-    if not order:
-        return order
-    result = dict(order)
-    if isinstance(result.get("create_time"), datetime):
-        result["create_time"] = result["create_time"].strftime("%Y-%m-%d %H:%M:%S")
-    if result.get("amount") is not None:
-        result["amount"] = float(result["amount"])
-    return result
-
 @app.get("/order/{order_id}")
 def get_order(order_id: str):
     """
@@ -135,28 +125,41 @@ def get_order(order_id: str):
 @app.put("/order/{order_id}/status")
 def update_order_status(order_id:str, status: str):
     """
-    更新订单状态（延迟双删）
-    流程：删缓存 -> 更新 DB -> 延迟再删缓存
+    更新订单状态（延迟双删 + 加分布式锁）
+    延迟双删流程：删缓存 -> 更新 DB -> 延迟再删缓存
+    锁保护：同一订单同一时刻只能有一个更新操作
     """
-    # 1.检查订单是否存在
-    order = db.get_order(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail=f"订单不存在:{order_id}")
+    # 1.抢锁
+    lock_value = lock.acquire_lock(order_id)
+    if lock_value is None:
+        # 没抢到锁 -> 说明有别的请求在处理同一订单
+        raise HTTPException(status_code=409, detail="操作太频繁，请稍后重试")
+    try:
+        # 2.检查订单是否存在
+        order = db.get_order(order_id)
+        if not order:
+            raise HTTPException(status_code = 404, detail=f"订单不存在：{order_id}")
 
-    # 2.先删一次缓存
-    cache.delete_order_cache(order_id)
-
-    # 3.更新 DB
-    db.update_order_status(order_id, status)
-
-    # 4.延迟再删一次（异步，不阻塞请求）
-    def delayed_delete():
-        time.sleep(config.CACHE_DOUBLE_DELETE_DELAY) 
+        # 3.先删缓存
         cache.delete_order_cache(order_id)
 
-    threading.Thread(target=delayed_delete, daemon=True).start()
+        # 4.更新 DB
+        updated = db.update_order_status(order_id, status)
+        if not updated:
+            raise HTTPException(status_code=404, detail="订单不存在或更新失败")
 
-    return {"order_id": order_id, "status": status, "msg": "更新成功"}
+        # 5.延迟再删缓存（异步）
+        def delayed_delete():
+            time.sleep(config.CACHE_DOUBLE_DELETE_DELAY)
+            cache.delete_order_cache(order_id)
+
+        threading.Thread(target=delayed_delete, daemon=True).start()
+
+        return {"order_id": order_id, "status": status, "msg": "更新成功"}
+
+    finally:
+        # 6.释放锁（无论成功失败都要释放） 
+        lock.release_lock(order_id, lock_value)
 
 @app.get("/health")
 def health():

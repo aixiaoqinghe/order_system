@@ -46,3 +46,7 @@ CACHE_TTL = 300                   # 缓存基础过期时间（秒）
 CACHE_TTL_JITTER = 60             # 随机偏移，防雪崩
 NULL_CACHE_TTL = 60               # 空值缓存过期时间，防穿透
 CACHE_DOUBLE_DELETE_DELAY = 1     # 延迟双删的延迟时间（秒）
+
+# 分布式锁
+LOCK_EXPIRE = 10                  # 分布式锁过期时间（秒）
+LOCK_KEY_PREFIX = "order:lock:"

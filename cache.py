@@ -4,18 +4,9 @@ order_system Redis 缓存封装
 """
 import json
 import random
-import redis
-
 import config
+from common.redis_conn import redis_client
 
-# 连接 Redis (和 consumer 幂等用的是同一个)
-redis_client = redis.Redis(
-    host = config.REDIS_HOST,
-    port = config.REDIS_PORT,
-    db = config.REDIS_DB,
-    decode_responses = True,
-    socket_connect_timeout = 3,
-)
 
 # 空值缓存标记：区分“订单不存在”和“缓存没命中”
 NULL_FLAG = "__NULL__"
