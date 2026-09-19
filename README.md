@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-一个基于 **FastAPI + RabbitMQ + Redis + MySQL** 的订单系统后端，覆盖分布式系统面试高频考点：
+一个基于 **FastAPI + RabbitMQ + Redis + MySQL** 的订单系统后端，覆盖分布式系统：
 
 - 同步转异步下单（削峰填谷）
 - 消息可靠性投递（Publisher Confirm + 手动 ACK）
@@ -212,7 +212,7 @@ order_system/
 └── requirements.txt        Python 依赖
 ```
 
-| 模块        | 面试亮点                                                 |
+| 模块        | 亮点                                                 |
 | ----------- | -------------------------------------------------------- |
 | `mq_client` | Publisher Confirm + mandatory = True，确保消息一定到 Broker |
 | `consumer`  | Redis SETNX 幂等 + headers 计数重试 + 手动 ACK + 死信队列 |
@@ -222,7 +222,7 @@ order_system/
 
 ---
 
-## Redis 缓存设计（面试重点）
+## Redis 缓存设计（重点）
 
 ### 1. Key 设计
 
