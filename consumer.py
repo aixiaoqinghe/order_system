@@ -2,9 +2,9 @@
 
 import json
 import logging
-import redis
 import pika
 from mq_client import MQClient
+from common.redis_conn import redis_client
 import config
 
 logging.basicConfig(
@@ -13,14 +13,6 @@ logging.basicConfig(
 )
 logging.getLogger('pika').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-
-# ========== Redis 连接 ==========
-redis_client = redis.Redis(
-    host = 'localhost',
-    port = 6379,
-    db = 0,
-    decode_responses = True
-)
 
 # 幂等键的过期时间（秒），防止Redis无限增长
 IDEMPOTENT_TTL = 3600   # 1小时
@@ -111,7 +103,7 @@ def main():
     try:
         redis_client.ping()
         logger.info("✅ Redis 连接成功")
-    except redis.ConnectionError:
+    except Exception:
         logger.error("❌ Redis 连接失败，请先启动 Redis")
         return
 

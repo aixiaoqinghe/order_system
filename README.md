@@ -249,7 +249,11 @@ SET order:cache:xxx = "__NULL__"   TTL = 60s   ← 空值缓存
 
 #### 缓存击穿（热点 key 过期瞬间大量并发）
 
-更新订单接口用 **分布式锁** 串行化同一订单的更新：
+项目暂未实现独立的"热点 key 重建互斥锁"，热点 key 过期后的并发查询走常规"查 DB → 回填缓存"流程。
+
+#### 并发更新防重（分布式锁）
+
+并发更新同一订单会导致**缓存与 DB 不一致**（两个线程同时更新、同时删缓存、互相覆盖），用 **分布式锁** 串行化同一订单的写操作：
 
 ```python
 lock_value = acquire_lock(order_id)       # SET NX EX 抢锁
@@ -304,3 +308,89 @@ end
 防止场景：线程 A 加锁 → 线程 A 业务慢导致锁自动过期 → 线程 B 加了同一把锁 → 线程 A 跑完直接 `DEL` 把 **线程 B 的锁** 删掉。
 
 用 Lua 脚本是因为要保证"查 → 比 → 删"三步原子性。
+
+---
+
+## 项目难点（面试加分项）
+
+| 难点                               | 问题描述                                                                 | 解决方案                                                |
+| ---------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------- |
+| 并发更新导致缓存不一致             | 两个线程同时更新同一订单：线程 A 删缓存 → 线程 B 查缓存 miss 读 DB 旧值 → 线程 A 写 DB → 线程 B 把旧值写回缓存 | 分布式锁串行化 + **延迟双删**（写完 DB 延迟 1s 再删一次） |
+| RabbitMQ 消息重复消费              | 网络抖动导致 Broker 重投、消费者重试时重复投递                          | Redis SETNX 幂等去重（`order:processes:{msg_id}`）+ 数据库主键 INSERT 兜底 |
+| 消费者业务异常但 MySQL 也可能挂了  | 怎么区分"需要重试的临时错误"和"不该重试的业务错误"                      | `bad` 订单模拟业务异常直接进死信；MySQL 挂了抛异常 → 触发重试机制 |
+| 分布式锁误删他人锁                 | 线程 A 持锁超时未释放，线程 B 抢到同一把锁，A 跑完直接 `DEL` 把 B 的锁删了 | 加锁 value 设 UUID，释放时用 **Lua 脚本**校验 value 一致性再删除 |
+
+---
+
+## 启动验证
+
+### 快速检查清单
+
+```
+✅ Redis 连上
+✅ RabbitMQ 连上
+✅ MySQL 建表了
+✅ 消费者跑着（终端 A 有 "订单消费者启动" 日志）
+✅ API 跑着（http://localhost:8000/docs 能打开 Swagger）
+```
+
+### 验证步骤
+
+**1. Swagger 页面**
+
+浏览器打开 `http://localhost:8000/docs`，应该看到三个接口：
+
+```
+POST   /order                 下单
+GET    /order/{order_id}      查单
+PUT    /order/{order_id}/status  改状态
+```
+
+**2. 正常下单**
+
+```bash
+curl -X POST http://localhost:8000/order ^
+     -H "Content-Type: application/json" ^
+     -d "{\"order_id\":\"order_001\",\"amount\":99.9}"
+```
+
+期望 API 立即返回：
+```json
+{"message": "订单已提交，正在处理中", "message_id": "xxx"}
+```
+
+**3. 看消费者日志**
+
+终端 A（消费者）应该出现：
+```
+📥 处理订单 (重试:0): order_001
+✅ 订单处理成功: order_001
+```
+
+**4. 查单**
+
+```bash
+curl http://localhost:8000/order/order_001
+```
+
+期望：
+```json
+{"order_id": "order_001", "amount": 99.9, "status": "created", "create_time": "..."}
+```
+
+同时 Redis 里多了一个键：
+```bash
+docker exec -it redis redis-cli GET "order:cache:order_001"
+# 返回订单 JSON
+```
+
+**5. 死信队列验证**
+
+下单一个含 `bad` 的订单：
+```bash
+curl -X POST http://localhost:8000/order ^
+     -H "Content-Type: application/json" ^
+     -d "{\"order_id\":\"order_bad_003\",\"amount\":299.9}"
+```
+
+消费者会重试 3 次后进死信队列，RabbitMQ 管理后台（`http://localhost:15672`）的 `order_dlx_queue` 里能看到这条消息。
